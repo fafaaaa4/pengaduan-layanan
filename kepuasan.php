@@ -1,19 +1,8 @@
 <?php
 session_start();
-require_once "config.php";
 
-/* =========================
-   FIX TIMEZONE (WIB)
-   ========================= */
-date_default_timezone_set('Asia/Jakarta');
-
-/* =========================
-   KONEKSI DATABASE
-   ========================= */
-$conn = pg_connect("host=$db_host port=$db_port dbname=$db_name user=$db_user password=$db_pass");
-if (!$conn) {
-  die("Koneksi PostgreSQL gagal: " . htmlspecialchars(pg_last_error()));
-}
+require_once __DIR__ . "/config/config.php";
+require_once __DIR__ . "/config/db.php";
 
 $_SESSION['tipe_form'] = 'kepuasan';
 
@@ -25,23 +14,22 @@ $allowed_services = [
   'rawat_inap','laboratorium'
 ];
 
-// Ambil semua pelayanan dari DB untuk mapping slug -> id
-$pelayanan_rows = [];
-$service_slug_to_id = [];
-
-$pelayananQ = pg_query($conn, "SELECT id, nama FROM pelayanan ORDER BY id ASC");
-if (!$pelayananQ) {
-  die("Gagal mengambil data pelayanan: " . htmlspecialchars(pg_last_error($conn)));
+/* =========================
+   Ambil semua pelayanan untuk mapping slug -> id
+   ========================= */
+try {
+    $pelayanan_rows = $pdo->query("SELECT id, nama FROM pelayanan ORDER BY id ASC")->fetchAll();
+} catch (PDOException $e) {
+    error_log($e->getMessage(), 3, __DIR__ . "/logs/error.log");
+    exit("Gagal mengambil data pelayanan");
 }
 
-while ($r = pg_fetch_assoc($pelayananQ)) {
-  $pelayanan_rows[] = $r;
-
-  $nama = strtolower(trim((string)$r['nama']));
-  $slug = preg_replace('/[^a-z0-9]+/', '_', $nama);
-  $slug = trim($slug, '_');
-
-  $service_slug_to_id[$slug] = (int)$r['id'];
+$service_slug_to_id = [];
+foreach ($pelayanan_rows as $r) {
+    $nama = strtolower(trim((string)$r['nama']));
+    $slug = preg_replace('/[^a-z0-9]+/', '_', $nama);
+    $slug = trim((string)$slug, '_');
+    $service_slug_to_id[$slug] = (int)$r['id'];
 }
 
 // Status lock
@@ -49,60 +37,62 @@ $service_locked = false;
 $service_from_url_id = null;
 
 if (isset($_GET['service'])) {
-  $candidate = strtolower(trim((string)$_GET['service']));
-  if (in_array($candidate, $allowed_services, true) && isset($service_slug_to_id[$candidate])) {
-    $service_locked = true;
-    $service_from_url_id = (int)$service_slug_to_id[$candidate];
-  }
+    $candidate = strtolower(trim((string)$_GET['service']));
+    if (in_array($candidate, $allowed_services, true) && isset($service_slug_to_id[$candidate])) {
+        $service_locked = true;
+        $service_from_url_id = (int)$service_slug_to_id[$candidate];
+    }
 }
 
 /* =========================
-   TANGGAL/JAM REAL TIME (SAAT HALAMAN DIBUKA)
-   (TAMPILAN SAJA)
+   TANGGAL/JAM REAL TIME (saat halaman dibuka)
    ========================= */
 $serverDate_open  = date('Y-m-d');
-$serverClock_open = date('H:i'); // WIB (contoh: 10:08)
+$serverClock_open = date('H:i');
 
 /* =========================
    AMBIL MASTER DATA
    ========================= */
-$jenisKelamin = pg_query($conn, "SELECT * FROM jenis_kelamin ORDER BY id ASC");
-$pendidikan   = pg_query($conn, "SELECT * FROM pendidikan ORDER BY id ASC");
-$pekerjaan    = pg_query($conn, "SELECT * FROM pekerjaan ORDER BY id ASC");
-$penjaminQ    = pg_query($conn, "SELECT * FROM penjamin ORDER BY id ASC");
-$pertanyaanQ  = pg_query($conn, "SELECT * FROM pertanyaan ORDER BY id ASC");
-
-if (!$jenisKelamin || !$pendidikan || !$pekerjaan || !$penjaminQ || !$pertanyaanQ) {
-  die("Gagal mengambil master data: " . htmlspecialchars(pg_last_error($conn)));
+try {
+    $jenisKelamin_rows = $pdo->query("SELECT * FROM jenis_kelamin ORDER BY id ASC")->fetchAll();
+    $pendidikan_rows   = $pdo->query("SELECT * FROM pendidikan ORDER BY id ASC")->fetchAll();
+    $pekerjaan_rows    = $pdo->query("SELECT * FROM pekerjaan ORDER BY id ASC")->fetchAll();
+    $penjamin_rows     = $pdo->query("SELECT * FROM penjamin ORDER BY id ASC")->fetchAll();
+    $pertanyaan_rows   = $pdo->query("SELECT * FROM pertanyaan ORDER BY id ASC")->fetchAll();
+} catch (PDOException $e) {
+    error_log($e->getMessage(), 3, __DIR__ . "/logs/error.log");
+    exit("Gagal mengambil master data");
 }
 
 /* =========================
    CARI ID BPJS
    ========================= */
 $bpjs_id = null;
-$penjamin_rows = [];
-while ($row = pg_fetch_assoc($penjaminQ)) {
-  $penjamin_rows[] = $row;
-  if (strtoupper(trim((string)$row['nama'])) === 'BPJS') {
-    $bpjs_id = (int)$row['id'];
-  }
+foreach ($penjamin_rows as $row) {
+    if (strtoupper(trim((string)$row['nama'])) === 'BPJS') {
+        $bpjs_id = (int)$row['id'];
+        break;
+    }
 }
 
 /* =========================
    CARI ID PERTANYAAN BIAYA/TARIF (Q4)
    ========================= */
 $Q4_ID = null;
-$q4Find = pg_query($conn, "
-  SELECT id
-  FROM pertanyaan
-  WHERE LOWER(deskripsi) LIKE '%biaya%'
-     OR LOWER(deskripsi) LIKE '%tarif%'
-  ORDER BY id ASC
-  LIMIT 1
-");
-if ($q4Find && ($r = pg_fetch_assoc($q4Find))) {
-  $Q4_ID = (int)$r['id'];
+try {
+    $stmtQ4 = $pdo->query("
+      SELECT id
+      FROM pertanyaan
+      WHERE LOWER(deskripsi) LIKE '%biaya%'
+         OR LOWER(deskripsi) LIKE '%tarif%'
+      ORDER BY id ASC
+      LIMIT 1
+    ");
+    $Q4_ID = (int)($stmtQ4->fetchColumn() ?: 0);
+} catch (PDOException $e) {
+    $Q4_ID = 0;
 }
+
 if (!$Q4_ID) $Q4_ID = 4; // fallback
 
 /* =========================
@@ -112,115 +102,112 @@ $error = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-  // Kunci tanggal & jam berdasarkan server SAAT SUBMIT (bukan dari user)
-  $surveyDateFinal = date('Y-m-d');
-  $surveyTimeFinal = date('H:i'); // ✅ JAM SERVER REAL (WIB)
+    // Kunci tanggal & jam berdasarkan server saat submit
+    $surveyDateFinal = date('Y-m-d');
+    $surveyTimeFinal = date('H:i');
 
-  // ========= VALIDASI DASAR =========
-  $valid = true;
+    // ========= VALIDASI DASAR =========
+    $valid = true;
 
-  $required = ['jenis_kelamin','pendidikan','pekerjaan','penjamin'];
-  foreach ($required as $f) {
-    if (!isset($_POST[$f]) || trim((string)$_POST[$f]) === '') {
-      $valid = false;
-      break;
-    }
-  }
-
-  // Pelayanan: kalau locked ambil dari URL, kalau tidak locked dari POST
-  if ($service_locked) {
-    $pelayanan_id = (int)$service_from_url_id;
-  } else {
-    $pelayanan_id = isset($_POST['pelayanan']) ? (int)$_POST['pelayanan'] : 0;
-    if (!$pelayanan_id) $valid = false;
-  }
-
-  $penjamin_id = isset($_POST['penjamin']) ? (int)$_POST['penjamin'] : 0;
-  if (!$penjamin_id) $valid = false;
-
-  $is_bpjs = ($bpjs_id !== null && $penjamin_id === (int)$bpjs_id);
-
-  // ========= VALIDASI PERTANYAAN =========
-  $pertanyaanIds = [];
-  $tmpQ = pg_query($conn, "SELECT id FROM pertanyaan ORDER BY id ASC");
-  if (!$tmpQ) {
-    $valid = false;
-  } else {
-    while ($r = pg_fetch_assoc($tmpQ)) {
-      $pertanyaanIds[] = (int)$r['id'];
-    }
-  }
-
-  foreach ($pertanyaanIds as $pid) {
-    $field = 'nilai' . $pid;
-
-    if ($pid === $Q4_ID && $is_bpjs) {
-      continue; // q4 tidak wajib jika BPJS
+    $required = ['jenis_kelamin','pendidikan','pekerjaan','penjamin'];
+    foreach ($required as $f) {
+        if (!isset($_POST[$f]) || trim((string)$_POST[$f]) === '') {
+            $valid = false;
+            break;
+        }
     }
 
-    if (!isset($_POST[$field]) || (string)$_POST[$field] === '') {
-      $valid = false;
-      break;
-    }
-  }
-
-  if (!$valid) {
-    $error = "Mohon lengkapi semua isian yang wajib diisi.";
-  } else {
-
-    // ========= INSERT PROFIL =========
-    $sqlProfil = "
-      INSERT INTO profil (
-        jenis_kelamin_id, pendidikan_id, pekerjaan_id, pelayanan_id, penjamin_id
-      ) VALUES ($1, $2, $3, $4, $5)
-      RETURNING id
-    ";
-
-    $resultProfil = pg_query_params($conn, $sqlProfil, [
-      (int)$_POST['jenis_kelamin'],
-      (int)$_POST['pendidikan'],
-      (int)$_POST['pekerjaan'],
-      (int)$pelayanan_id,
-      (int)$penjamin_id
-    ]);
-
-    if (!$resultProfil) {
-      $error = "Gagal menyimpan profil: " . pg_last_error($conn);
+    // Pelayanan: kalau locked ambil dari URL, kalau tidak locked dari POST
+    if ($service_locked) {
+        $pelayanan_id = (int)$service_from_url_id;
     } else {
-      $profilRow = pg_fetch_assoc($resultProfil);
-      $profil_id = (int)$profilRow['id'];
+        $pelayanan_id = isset($_POST['pelayanan']) ? (int)$_POST['pelayanan'] : 0;
+        if (!$pelayanan_id) $valid = false;
+    }
 
-      // ========= INSERT KUISIONER =========
-      foreach ($pertanyaanIds as $pid) {
+    $penjamin_id = isset($_POST['penjamin']) ? (int)$_POST['penjamin'] : 0;
+    if (!$penjamin_id) $valid = false;
+
+    $is_bpjs = ($bpjs_id !== null && $penjamin_id === (int)$bpjs_id);
+
+    // ========= VALIDASI PERTANYAAN =========
+    $pertanyaanIds = array_map(fn($r) => (int)$r['id'], $pertanyaan_rows);
+
+    foreach ($pertanyaanIds as $pid) {
         $field = 'nilai' . $pid;
 
-        // q4: jika BPJS -> 0
-        $nilai = ($pid === $Q4_ID && $is_bpjs) ? 0 : (int)$_POST[$field];
-
-        $ins = pg_query_params($conn, "
-          INSERT INTO kuisioner (
-            pertanyaan_id, nilai, profil_id, survey_date, survey_time
-          ) VALUES ($1, $2, $3, $4, $5)
-        ", [
-          (int)$pid,
-          (int)$nilai,
-          (int)$profil_id,
-          $surveyDateFinal,
-          $surveyTimeFinal
-        ]);
-
-        if (!$ins) {
-          $error = "Gagal menyimpan jawaban kuisioner: " . pg_last_error($conn);
-          break;
+        if ($pid === $Q4_ID && $is_bpjs) {
+            continue; // q4 tidak wajib jika BPJS
         }
-      }
 
-      if (!$error) {
-        header("Location: thank-you.php");
-        exit;
-      }
+        if (!isset($_POST[$field]) || (string)$_POST[$field] === '') {
+            $valid = false;
+            break;
+        }
     }
-  }
+
+    if (!$valid) {
+        $error = "Mohon lengkapi semua isian yang wajib diisi.";
+    } else {
+
+        try {
+            $pdo->beginTransaction();
+
+            // ========= INSERT PROFIL =========
+            $sqlProfil = "
+              INSERT INTO profil (
+                jenis_kelamin_id, pendidikan_id, pekerjaan_id, pelayanan_id, penjamin_id
+              ) VALUES (:jk, :pd, :pk, :pl, :pn)
+              RETURNING id
+            ";
+
+            $stmtProfil = $pdo->prepare($sqlProfil);
+            $stmtProfil->execute([
+                ':jk' => (int)$_POST['jenis_kelamin'],
+                ':pd' => (int)$_POST['pendidikan'],
+                ':pk' => (int)$_POST['pekerjaan'],
+                ':pl' => (int)$pelayanan_id,
+                ':pn' => (int)$penjamin_id,
+            ]);
+
+            $profil_id = (int)$stmtProfil->fetchColumn();
+            if (!$profil_id) {
+                throw new RuntimeException("Gagal mendapatkan ID profil");
+            }
+
+            // ========= INSERT KUISIONER =========
+            $stmtIns = $pdo->prepare("
+              INSERT INTO kuisioner (
+                pertanyaan_id, nilai, profil_id, survey_date, survey_time
+              ) VALUES (:pid, :nilai, :profil, :sdate, :stime)
+            ");
+
+            foreach ($pertanyaanIds as $pid) {
+                $field = 'nilai' . $pid;
+
+                // q4: jika BPJS -> 0
+                $nilai = ($pid === $Q4_ID && $is_bpjs) ? 0 : (int)$_POST[$field];
+
+                $stmtIns->execute([
+                    ':pid'   => (int)$pid,
+                    ':nilai' => (int)$nilai,
+                    ':profil'=> (int)$profil_id,
+                    ':sdate' => $surveyDateFinal,
+                    ':stime' => $surveyTimeFinal,
+                ]);
+            }
+
+            $pdo->commit();
+
+            header("Location: thank-you.php");
+            exit;
+
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            error_log($e->getMessage(), 3, __DIR__ . "/logs/error.log");
+            $error = "Terjadi kesalahan saat menyimpan data. Silakan coba lagi.";
+        }
+    }
 }
 ?>
 
@@ -260,7 +247,7 @@ include 'layout/header.php';
             outline:none;
           "
         >
-        <input type="hidden" name="surveyDate" value="<?= htmlspecialchars($serverDate_open) ?>"> 
+        <input type="hidden" name="surveyDate" value="<?= htmlspecialchars($serverDate_open) ?>">
       </div>
 
       <div class="input-group" style="flex:1; min-width:240px;">
@@ -294,16 +281,16 @@ include 'layout/header.php';
         <div class="form-field">
           <label>Jenis Kelamin * <span style="color:#e74c3c;">(Pilih salah satu)</span></label>
           <div class="radio-group">
-            <?php while ($row = pg_fetch_assoc($jenisKelamin)): ?>
+            <?php foreach ($jenisKelamin_rows as $row): ?>
               <?php
-                $genderLabel = ($row['nama'] === 'L') ? 'Laki-laki' : 'Perempuan';
+                $genderLabel = ((string)$row['nama'] === 'L') ? 'Laki-laki' : 'Perempuan';
                 $id = strtolower(str_replace(' ', '_', $genderLabel));
               ?>
               <div class="radio-option">
                 <input type="radio" id="<?= $id ?>" name="jenis_kelamin" value="<?= (int)$row['id'] ?>" required>
                 <label for="<?= $id ?>"><?= htmlspecialchars($genderLabel) ?></label>
               </div>
-            <?php endwhile; ?>
+            <?php endforeach; ?>
           </div>
         </div>
       </div>
@@ -312,13 +299,13 @@ include 'layout/header.php';
         <div class="form-field">
           <label>Pendidikan * <span style="color:#e74c3c;">(Pilih salah satu)</span></label>
           <div class="radio-group">
-            <?php while ($row = pg_fetch_assoc($pendidikan)): ?>
+            <?php foreach ($pendidikan_rows as $row): ?>
               <?php $edu = (string)$row['nama']; $id = strtolower(str_replace(' ', '_', $edu)); ?>
               <div class="radio-option">
                 <input type="radio" id="<?= $id ?>" name="pendidikan" value="<?= (int)$row['id'] ?>" required>
                 <label for="<?= $id ?>"><?= htmlspecialchars($edu) ?></label>
               </div>
-            <?php endwhile; ?>
+            <?php endforeach; ?>
           </div>
         </div>
       </div>
@@ -327,20 +314,18 @@ include 'layout/header.php';
         <div class="form-field">
           <label>Pekerjaan * <span style="color:#e74c3c;">(Pilih salah satu)</span></label>
           <div class="radio-group">
-            <?php while ($row = pg_fetch_assoc($pekerjaan)): ?>
+            <?php foreach ($pekerjaan_rows as $row): ?>
               <?php $job = (string)$row['nama']; $id = strtolower(str_replace(' ', '_', $job)); ?>
               <div class="radio-option">
                 <input type="radio" id="<?= $id ?>" name="pekerjaan" value="<?= (int)$row['id'] ?>" required>
                 <label for="<?= $id ?>"><?= htmlspecialchars($job) ?></label>
               </div>
-            <?php endwhile; ?>
+            <?php endforeach; ?>
           </div>
         </div>
       </div>
 
-      <!-- =========================
-           JENIS LAYANAN (RADIO) + LOCK
-           ========================= -->
+      <!-- JENIS LAYANAN + LOCK -->
       <div class="form-row">
         <div class="form-field">
           <label>Jenis Layanan * <span style="color:#e74c3c;">(Pilih salah satu)</span></label>
@@ -358,10 +343,10 @@ include 'layout/header.php';
                 $serviceName = (string)$row['nama'];
                 $serviceId   = (int)$row['id'];
                 $slug = preg_replace('/[^a-z0-9]+/', '_', strtolower(trim($serviceName)));
-                $slug = trim($slug, '_');
+                $slug = trim((string)$slug, '_');
 
-                $inputId = 'svc_' . $serviceId;
-                $checked = ($service_locked && $serviceId === (int)$service_from_url_id) ? 'checked' : '';
+                $inputId  = 'svc_' . $serviceId;
+                $checked  = ($service_locked && $serviceId === (int)$service_from_url_id) ? 'checked' : '';
                 $disabled = $service_locked ? 'disabled' : '';
                 $required = $service_locked ? '' : 'required';
               ?>
@@ -410,7 +395,7 @@ include 'layout/header.php';
     <div class="questions-section">
       <?php
       $qnum = 1;
-      while ($row = pg_fetch_assoc($pertanyaanQ)) {
+      foreach ($pertanyaan_rows as $row) {
         $pid  = (int)$row['id'];
         $desc = htmlspecialchars((string)$row['deskripsi']);
         $nilai_name = 'nilai' . $pid;

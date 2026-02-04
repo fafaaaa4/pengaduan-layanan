@@ -1,19 +1,8 @@
 <?php
 session_start();
-require_once "config.php";
 
-/* =========================
-   FIX TIMEZONE (WIB)
-   ========================= */
-date_default_timezone_set('Asia/Jakarta');
-
-/* =========================
-   KONEKSI POSTGRESQL
-   ========================= */
-$conn = pg_connect("host=$db_host port=$db_port dbname=$db_name user=$db_user password=$db_pass");
-if (!$conn) {
-  die("Koneksi PostgreSQL gagal");
-}
+require_once __DIR__ . "/config/config.php";
+require_once __DIR__ . "/config/db.php";
 
 $_SESSION['tipe_form'] = 'keluhan';
 
@@ -31,11 +20,11 @@ $error_message = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-  if (
-    empty($_POST['alamat']) ||
-    empty($_POST['no_hp']) ||
-    empty($_POST['masukan'])
-  ) {
+  $alamat  = trim((string)($_POST['alamat'] ?? ''));
+  $no_hp   = trim((string)($_POST['no_hp'] ?? ''));
+  $masukan = trim((string)($_POST['masukan'] ?? ''));
+
+  if ($alamat === '' || $no_hp === '' || $masukan === '') {
     $error_message = "Alamat, nomor HP, dan keluhan wajib diisi.";
   } else {
 
@@ -43,28 +32,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $tanggalFinal = date('Y-m-d');
     $pukulFinal   = date('H:i');
 
-    $sql = "
-      INSERT INTO keluhan (
-        alamat, no_hp, masukan, pukul, tanggal
-      ) VALUES (
-        $1, $2, $3, $4, $5
-      )
-    ";
+    try {
+      $sql = "
+        INSERT INTO keluhan (
+          alamat, no_hp, masukan, pukul, tanggal
+        ) VALUES (
+          :alamat, :no_hp, :masukan, :pukul, :tanggal
+        )
+      ";
 
-    $params = [
-      trim((string)$_POST['alamat']),
-      trim((string)$_POST['no_hp']),
-      trim((string)$_POST['masukan']),
-      $pukulFinal,
-      $tanggalFinal
-    ];
+      $stmt = $pdo->prepare($sql);
+      $stmt->execute([
+        ':alamat'  => $alamat,
+        ':no_hp'   => $no_hp,
+        ':masukan' => $masukan,
+        ':pukul'   => $pukulFinal,
+        ':tanggal' => $tanggalFinal
+      ]);
 
-    $result = pg_query_params($conn, $sql, $params);
-
-    if ($result) {
       header("Location: thank-you.php");
       exit;
-    } else {
+
+    } catch (Throwable $e) {
+      error_log($e->getMessage(), 3, __DIR__ . "/logs/error.log");
       $error_message = "Gagal menyimpan data ke database.";
     }
   }
